@@ -1,0 +1,688 @@
+---
+title: "MDE_PFAS_MDWMC_nov2024"
+author: "Krista Kraskura"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, echo=F, message=F, warning = F)
+```
+
+```{r setup and data wrangling}
+# setup, libraries ---- 
+library(tidyverse)
+library(here)
+library(ggsci)
+library(ggrepel)
+library(readxl)
+library(ggpubr)
+library(lubridate)
+library(RColorBrewer)
+
+# for maps: 
+library(maps)
+library(sf)
+library(ggplot2)
+library(ggmap)
+library(ggspatial)
+library(rnaturalearth)
+library(rnaturalearthhires)
+library(parzer)
+
+
+# data wrangling -----
+# read in their data 
+d_fish_21<-read_excel(here("data/2021AdvisoryData_PFAS_AWQMSFinal.xlsx"), sheet = 1)
+d_fish_22<-read_excel(here("data/2022AdvisoryData_PFAS_AWQMSFinal.xlsx"), sheet = 1)
+d_fish_23<-read_excel(here("data/2023AdvisoryData_GEL_PFAS_AWQMSFinal.xlsx"), sheet = 1)
+
+d_fishPisc_22<-read_excel(here("data/2022AdvisoryData_PFAS_AWQMSFinal_Piscataway.xlsx"), sheet = 1)
+d_fish<-read_excel(here("data/PFAS_Tissue_2020_21_22.xlsx"), sheet = 1, skip = 1)
+
+d_water<-read_excel(here("data/PFAS_SurfaceWater_2021_22.xlsx"), sheet = 1, skip = 1)
+
+# water data has a class a whole PFAS sum class, take that out, fix logic later
+d_water_tot<-d_water %>% 
+  filter(`Characteristic Name` == "Per- and polyfluoroalkyl substances")
+d_water<-d_water %>% 
+  filter(!`Characteristic Name` == "Per- and polyfluoroalkyl substances") 
+
+data_loc<-read_excel(here("data/locations.xlsx"), sheet = 1)
+data_pfas_names<-read_excel(here("data/PFAS_acronyms.xlsx"), sheet = 1)
+data_pfas_names<-data_pfas_names[, 1:2]
+
+# are data in d_fish 21, 22, and 23 overlap with data in Piscataway data and PFAS_Tissue_2020_21_22 data?
+# identify duplicates 
+n21<-length(unique(d_fish_21$Activity_ID)) # 19
+n22<-length(unique(d_fish_22$Activity_ID)) # 68
+n23<-length(unique(d_fish_23$Activity_ID)) # 65
+n20s<-length(unique(d_fish$`Activity ID`)) # 152
+np<-length(unique(d_fishPisc_22$Activity_ID)) # 8]
+
+
+# n21+n22+n23+n20s+np # 312 
+# n21+n22+n23 == n20s # this is a combo of all years?
+
+# all(c((levels(factor(d_fish_21$Activity_ID))),
+#   (levels(factor(d_fish_22$Activity_ID))), 
+#   (levels(factor(d_fish_23$Activity_ID))))  ==
+#   levels(factor(d_fish$`Activity ID`))) # all Activity IDs are the same 
+
+# do Piscataway fish are also in the 20-22 data? --> no
+# grepl(pattern = paste(levels(factor(d_fishPisc_22$Activity_ID)), collapse = "|"),
+#       x = levels(factor(d_fish$`Activity ID`)), ignore.case = TRUE)
+
+# merge piscataway and other fish data
+d_fish<-rbind(d_fish_21, d_fish_22, d_fish_23, d_fishPisc_22)
+
+# format all sampling dates as dates
+d_fish$ActivitySdate<-as.Date(d_fish$ActivitySdate)
+d_water$`Activity Start Date`<-as.Date(d_water$`Activity Start Date`)
+
+# take out all columns that contain NA only
+d_fish<-d_fish[,which(unlist(lapply(d_fish, function(x)!all(is.na(x))))),with=F]
+d_water<-d_water[,which(unlist(lapply(d_water, function(x)!all(is.na(x))))),with=F]
+
+# get matching column names to combine all data in one sheet
+names(d_fish) <- gsub(" ", "_", names(d_fish))
+names(d_water) <- gsub(" ", "_", names(d_water))
+
+# need project ID
+d_fish$Organization_ID<-"MDE"
+names(d_fish)[names(d_fish) == "Monitoring_L_ID"] <- "Monitoring_Location_ID"
+names(d_fish)[names(d_fish) == "ActivitySdate"] <- "Activity_Start_Date"
+names(d_fish)[names(d_fish) == "Project_name"] <- "Project_ID"
+names(d_fish)[names(d_fish) == "RD_Q_limit_measure"] <- "Detection_Limit_Value"
+names(d_fish)[names(d_fish) == "RD_Q_limit_unit"] <- "Detection_Limit_Unit"
+names(d_fish)[names(d_fish) == "Lab_name"] <- "Laboratory_Name"
+names(d_fish)[names(d_fish) == "Activity_Media_Name"] <- "Activity_Media"
+names(d_fish)[names(d_fish) == "Char_name"] <- "Characteristic_Name"
+names(d_water)[names(d_water) == "Detection_Limit_Value1"] <- "Detection_Limit_Value"
+names(d_water)[names(d_water) == "Detection_Limit_Unit1"] <- "Detection_Limit_Unit"
+names(d_water)[names(d_water) == "Project_ID1"] <- "Project_ID"
+d_water$Subject_Taxonomic_Name <- "water" # no species in this data
+
+# rbind data to make one final dataframe
+data<-rbind(d_fish[ ,c("Organization_ID","Project_ID", "Activity_ID", "Monitoring_Location_ID",
+                "Activity_Type", "Activity_Start_Date", "Laboratory_Name", "Result_Value_Type", "Result_Value",
+                "Subject_Taxonomic_Name","Characteristic_Name", "Activity_Media",
+                "Sample_Collection_Method_ID", "Detection_Limit_Unit", "Detection_Limit_Value")],
+      d_water[ ,c("Organization_ID","Project_ID", "Activity_ID", "Monitoring_Location_ID",
+                "Activity_Type","Activity_Start_Date", "Laboratory_Name", "Result_Value_Type", "Result_Value",
+                "Subject_Taxonomic_Name","Characteristic_Name", "Activity_Media",
+                "Sample_Collection_Method_ID", "Detection_Limit_Unit", "Detection_Limit_Value")])
+
+# make all lower case
+data$Characteristic_Name<-tolower(data$Characteristic_Name)
+d_water$Characteristic_Name<-tolower(d_water$Characteristic_Name)
+
+# levels(factor(data$Characteristic_Name))
+
+# pivot wide format data, one line per date per species
+# and add in PFAS abbreviations 
+data<-merge(data, data_pfas_names, by = "Characteristic_Name", all.x = TRUE)
+d_water<-merge(d_water, data_pfas_names, by = "Characteristic_Name", all.x = TRUE)
+
+
+data_w<-data %>% 
+  select(-Result_Value_Type, - Detection_Limit_Unit, -Detection_Limit_Value, - Characteristic_Name) %>% 
+  pivot_wider(names_from = Characteristic_Name_abr,
+              values_from = Result_Value)
+names(data_w) <- gsub(" ", "_", names(data_w))
+
+# subset data by type (pfas, size, sample size)
+data_m<-data %>% 
+  filter(Characteristic_Name == "average weight") # body size 
+data_len<-data %>% 
+  filter(Characteristic_Name == "average length") # body length
+data_n<-data %>% 
+  filter(Characteristic_Name == "number of individuals") # number of individuals
+data_tot<-data %>% 
+  filter(Characteristic_Name == "total pfas") # number of individuals
+
+data_l<-data %>%  # pfas data
+  filter(!Characteristic_Name == "average weight", 
+         !Characteristic_Name == "average length", 
+         !Characteristic_Name == "number of individuals", 
+         !Characteristic_Name == "total pfas")
+
+# n of unique sample sizes
+ntot<-length(unique(data_l$Activity_ID)) # 242 samples 
+ntot_m<-length(unique(data_m$Activity_ID)) # 159
+ntot_l<-length(unique(data_l$Activity_ID)) # 242
+ntot_n<-length(unique(data_n$Activity_ID)) # 160
+
+names(data_m)[names(data_m) == 'Result_Value'] <- 'Mass_g'
+names(data_len)[names(data_len) == 'Result_Value'] <- 'Length_cm'
+names(data_n)[names(data_n) == 'Result_Value'] <- 'n'
+names(data_tot)[names(data_tot) == 'Result_Value'] <- 'Sum_PFAS'
+
+# merge data sets and format
+data_l<-(merge(data_l, data_m[, c("Activity_ID", "Mass_g")], by = "Activity_ID", all.x = TRUE))
+data_l<-(merge(data_l, data_len[, c("Activity_ID", "Length_cm")], by = "Activity_ID", all.x = TRUE))
+data_l<-(merge(data_l, data_n[, c("Activity_ID", "n")], by = "Activity_ID", all.x = TRUE))
+data_l<-(merge(data_l, data_tot[, c("Activity_ID", "Sum_PFAS")], by = "Activity_ID", all.x = TRUE))
+
+# as factor and as numeric for various variables
+data_l<-data_l %>% 
+  mutate_at(c("Result_Value", "Detection_Limit_Value", "Length_cm", "Mass_g", "n", "Sum_PFAS"), as.numeric) %>% 
+  mutate_at(c("Activity_ID", "Organization_ID", "Project_ID", "Monitoring_Location_ID", 
+              "Activity_Type", "Laboratory_Name", "Result_Value_Type", 
+              "Subject_Taxonomic_Name", "Characteristic_Name", "Activity_Media", 
+              "Sample_Collection_Method_ID", "Detection_Limit_Unit"), as.factor) 
+
+
+# merge in location data
+data_l<-merge(data_l, data_loc, by = "Monitoring_Location_ID")
+d_water<-merge(d_water, data_loc, by = "Monitoring_Location_ID")
+data_tot<-merge(data_tot, data_loc, by = "Monitoring_Location_ID")
+
+# merge PFAS names 
+# d_water<-merge(d_water, data_pfas_names, by = "Characteristic_Name", all.x = TRUE)
+# data_tot<-merge(data_tot, data_pfas_names, by = "Characteristic_Name", all.x = TRUE)
+
+# percent PFAS
+data_l$pct_PFAS<-data_l$Result_Value/data_l$Sum_PFAS
+data_l$Year<-lubridate::year(data_l$Activity_Start_Date)
+data_l$Month<-lubridate::month(data_l$Activity_Start_Date)
+
+# save data
+# write.csv(x = data_l[!data_l$Subject_Taxonomic_Name == "water",], file = here("data", "Kraskura_MDE_fish_longformat_042024.csv"))
+# write.csv(x = d_water, file = here("data", "Kraskura_MDE_water_longformat_042024.csv"))
+# write.csv(x = data_tot, file = here("data", "Kraskura_MDE_sumPFAS_longformat_042024.csv"))
+```
+
+```{r colors}
+# set colors always consistent
+
+data_pfas_names$Characteristic_Name_abr <- gsub(pattern = "6:2 FTSA", replacement = "62FTSA", data_pfas_names$Characteristic_Name_abr)
+data_pfas_names$Characteristic_Name_abr<- gsub(pattern = "4:2 FTSA", replacement = "42FTSA", data_pfas_names$Characteristic_Name_abr)
+
+names(cols_pfas) <- unique(data_pfas_names$Characteristic_Name_abr)
+
+# all unique PFAS in the entire dataset
+
+cols_pfas<- c("11ClPF3OUdS" = "#FD0022",
+ "9ClPF3ONS" = "red4",
+ "ADONA" = "black",
+ "82FTCA" = "#FB0DE2",
+ "82FTS"  = "#00FBE2",
+ "82FTUCA" = "#F2C4C7",
+ "82diPAP" = "#FE948F", 
+ "53FTCA" = "#B60D5D",
+ "EtFOSAA"  = "#F2E300",
+ "FBSA"  = "grey80",
+ "FOSA"   = "#D491FF",
+ "42FTS" = "#843573",
+ "4:2 FTSA" = "#843573",
+ "4:2 FTSA " = "#843573",
+ "4:2 FTSA" = "#843573",
+ "HFPODA"  = "green",     
+"MeFOSA"  = "#AAF597",
+"MeFOSAA"  = "#36C2CE",
+"NEtFOSA"  = "#0081cf",
+"NEtFOSAA" = "yellow",
+"NEtFOSE"  = "blue4",
+"NFDHA" = "#0D95FC",
+"NMeFOSA"  = "#62686A",
+"NMeFOSAA" = "grey30",
+"73FTCA"  = "#A49949",
+"62DiPAP" = "#FB78D1",
+"62FTCA"  = "#7A3800",
+"6:2 FTSA"  = "#7A3868",
+"62FTS"  = "#BF0DFF",
+"62FTUCA" = "#AAF597",
+"102FTCA"  = "#843573",
+"102FTS"  = "#BEE7FB",
+"NMeFOSE" = "#79BE9E",
+"PFBA" = "#FF0060",
+"PFBS" = "#FFFF80",
+"PFDoA"  = "grey19",
+"PFDoS"  = "brown",
+"PFDS"  = "#005600",
+"PFEESA"  = "white",
+"PFHpA" = "#00c9a7",
+"PFHpS" = "#402E7A",
+"PFHps" = "#402E7A",
+"PFHxA"  = "#C63C51",
+"FHxSA"  = "yellow4",
+"PFHxDA" = "#C9DABF",
+"PFMBA"  = "#f3c5ff",
+"PFMPA"  = "#B5C18E",
+"PFNS"  = "#1679A4" ,
+"PFODA"  = "#FFFF80",
+"diSAmPAP"  = "#E9C874",
+ "NMeFOSAA"  = "#88D66C",
+"FOSAA"  = "#059212",
+ 'PFEtCHxS' = '#AA4499',
+ 'PFHxS' = '#332288', # 
+ 'PFOS' = "#C4A2D5", # 
+ 'PFOA' = '#117733',
+ 'PFNA' = '#88CCEE',
+ 'PFDA' = 'orange',
+"PFOSA" ="#C0D6E8" ,
+"PFPeA" = "#E9C874",
+"PFPeS"  = '#882255',
+"PFPrS" = "#FC1CB1",
+"PFTeDA" = "#AFF700",
+"PFTrDA" = "#D20062",
+"ClPFOS" ="#ECFFE6",
+"PFUnA" = "#0D1282",        
+"33FTCA" = "#22D9FF", 
+ "EtFOSA" = "grey",
+ "MeFOSE"= "#FD5C5A",
+  "EtFOSE" = "#22D943",
+ "PFecHS" = "grey50")
+# names(P50)<-levels(factor(d_analytes$Analyte_short))
+
+```
+
+
+
+### PFAS by location 
+```{r map with data, fig.width=7, fig.height=7, fig.cap = "Figure 1. The map of all sampling locations across years 2020-2022."}
+
+# water data
+d_water_sum<-d_water %>% 
+  dplyr::group_by(Activity_Start_Date, Organization_ID,
+                  Activity_ID, Monitoring_Location_ID,
+                  Monitoring_Location_Name, Region) %>% 
+  summarise(Sum_PFAS = sum(Result_Value), .groups = "keep") %>% 
+  mutate(media = "water")
+d_water_sum$Year<-year(d_water_sum$Activity_Start_Date)
+
+
+# fish data
+data_tot$Year<-year(data_tot$Activity_Start_Date)
+data_tot_sum<-data_tot %>% 
+  mutate(across(c(Sum_PFAS), as.numeric), 
+         across(c(Organization_ID, Project_ID,
+                  Activity_ID, Monitoring_Location_ID,
+                  Region, Waterbody, Subject_Taxonomic_Name), as.factor), 
+         across(c(Activity_Start_Date), as.Date)) %>% 
+  dplyr::group_by(Monitoring_Location_ID, Region, Year, Activity_Start_Date, Subject_Taxonomic_Name) %>% 
+  summarise(Sum_PFAS_mean = mean(Sum_PFAS, na.rm = TRUE),
+            Sum_PFAS_sd = sd(Sum_PFAS, na.rm = TRUE),
+            .groups = "keep") %>% 
+  mutate(media = "fish")
+
+# Need extra package for high resolution data
+# install.packages("rnaturalearthhires", repos = "https://ropensci.r-universe.dev")
+# download if needed
+
+# rivers <- ne_load(scale = 10, type = "rivers_lake_centerlines", destdir = "maps", returnclass = "sf")
+# lakes <- ne_load(scale = 10, type = "lakes", destdir = "maps", returnclass = "sf")
+
+# get base map 
+my_states <- c("Maryland") # set my state
+us_md<-ne_states(country = 'United States of America',
+              returnclass = 'sf') %>% 
+  mutate(color_state = name %in% my_states)  # get the map and modify data for additions
+
+# get rivers: 
+# rivers50 <- ne_download(scale = 50, type = 'rivers_lake_centerlines', category = 'physical') 
+# riversped <- st(st_as_sf(rivers50),
+#                           xmin = -80, xmax = -75,
+#                           ymin = 37.5, ymax = 40)
+
+coord_loc<-parse_lon_lat(lon = data_loc$Longitude, lat = data_loc$Latitude)
+data_loc<-cbind(data_loc, coord_loc)
+data_loc$lon<-data_loc$lon*-1
+
+# get sum PFAS in the dataframe 
+# per year and per media (fish and water)
+
+# merge water data - sum PFAS
+data_loc<-merge(data_loc, d_water_sum[, c("Year", "Sum_PFAS", "Monitoring_Location_ID")],
+                by = "Monitoring_Location_ID",
+                all.x = TRUE)
+names(data_loc)[names(data_loc) == 'Sum_PFAS'] <- 'SumPFAS_water'
+names(data_loc)[names(data_loc) == 'Year'] <- 'Year_water'
+
+# merge Fish data - sum PFAS
+data_loc<-merge(data_loc, data_tot[, c("Year", "Sum_PFAS", "Monitoring_Location_ID", "Subject_Taxonomic_Name")],
+                by = "Monitoring_Location_ID",
+                all.x = TRUE)
+names(data_loc)[names(data_loc) == 'Sum_PFAS'] <- 'SumPFAS_fish'
+names(data_loc)[names(data_loc) == 'Year'] <- 'Year_fish'
+
+data_loc$SumPFAS_fish<-as.numeric(data_loc$SumPFAS_fish)
+
+# plotting the map
+base_map<-ggplot(us_md) +
+  geom_sf(data = us_md) +
+  geom_sf(aes(fill = color_state), color = NA, show.legend = F) +
+  scale_fill_manual(values = c("grey95", "grey65")) +
+  # geom_sf(data = riversped, col = 'blue3')+
+  coord_sf(xlim = c(-79.7, -75), ylim = c(37.5, 40))+
+  theme_pubclean()+
+  scale_color_jama()+
+  geom_point(data = data_loc,
+             mapping = aes(x = lon, y = lat, color  = Region))+
+    # geom_text(data = data_loc,
+             # mapping = aes(x = lon, y = lat, color  = Region, label = Monitoring_Location_ID), size = 1.5, color = "black")+
+  # annotate(geom = "text", x = -78, y = 38, label = "MD", 
+  #      fontface = "italic", color = "grey22", size = 4)+
+  theme(axis.title = element_blank(), 
+        legend.title = element_blank(),
+        legend.position = "right")+
+  ggtitle("All sampling locations by region")
+base_map
+ggsave(plot = base_map, file = here("figures/sampleMap_PFAS_MDWMC.png"), 
+       type = "cairo-png",  bg = "transparent",
+       width = 12, height = 12, units = "cm", dpi = 800)
+
+```
+
+```{r map with data in water, fig.width=7, fig.height=14, fig.cap= "Figure 2. Sum PFAS in water by sampling location in each region. The size of the symbol is the relative to the sum PFAS, the color marks the sampling region."}
+# plotting the map with sum PFAS in water 2021
+p_water_2021<-ggplot(us_md) +
+  geom_sf(data = us_md) +
+  geom_sf(aes(fill = color_state), color = NA, show.legend = F) +
+  scale_fill_manual(values = c("grey95", "grey45")) +
+  # geom_sf(data = riversped, col = 'blue3')+
+  coord_sf(xlim = c(-79.7, -75), ylim = c(37.5, 40))+
+  theme_pubclean()+
+  # scale_color_jama()+
+  geom_point(data = subset(data_loc, data_loc$Year_water == 2021),
+             mapping = aes(x = lon, y = lat,
+                           # color  = Region,
+                           size = SumPFAS_water), 
+             pch=21, color = "blue")+
+  scale_radius(limits = c(0, 80), range = c(1, 6)) + 
+  # annotate(geom = "text", x = -78, y = 38, label = "MD", 
+  #      fontface = "italic", color = "grey22", size = 4)+
+  theme(axis.title = element_blank(), 
+        legend.title = element_blank())+
+  guides(color=guide_legend(ncol=2)) +
+  ggtitle("Sum PFAS in water - 2021")
+
+
+p_water_2022<-ggplot(us_md) +
+  geom_sf(data = us_md) +
+  geom_sf(aes(fill = color_state), color = NA, show.legend = F) +
+  scale_fill_manual(values = c("grey95", "grey45")) +
+  # geom_sf(data = riversped, col = 'blue3')+
+  coord_sf(xlim = c(-79.7, -75), ylim = c(37.5, 40))+
+  theme_pubclean()+
+  # scale_color_jama()+
+  geom_point(data = subset(data_loc, data_loc$Year_water == 2022),
+             mapping = aes(x = lon, y = lat,
+                           # color  = Region,
+                           size = SumPFAS_water), 
+             pch=21, color = "blue")+
+  scale_radius(limits = c(0, 80), range = c(1, 6)) + 
+  # annotate(geom = "text", x = -78, y = 38, label = "MD", 
+  #      fontface = "italic", color = "grey22", size = 4)+
+  theme(axis.title = element_blank(), 
+        legend.title = element_blank())+
+  guides(color=guide_legend(ncol=2)) +
+  ggtitle("Sum PFAS in water - 2022")
+
+# watermap<-cowplot::plot_grid(p_water_2021, p_water_2022, nrow = 2, labels = "AUTO")
+```
+
+```{r map with fish sampling data}
+
+p_fish_2021<-ggplot(us_md) +
+  geom_sf(data = us_md) +
+  geom_sf(aes(fill = color_state), color = NA, show.legend = F) +
+  scale_fill_manual(values = c("grey95", "grey45")) +
+  # geom_sf(data = riversped, col = 'blue3')+
+  coord_sf(xlim = c(-79.7, -75), ylim = c(37.5, 40))+
+  theme_pubclean()+
+  scale_color_jama()+
+  geom_point(data = subset(data_loc, data_loc$Year_fish == 2021),
+             mapping = aes(x = lon, y = lat,
+                           color  = Region,
+                           size = SumPFAS_fish), 
+             pch=21, color = "red")+
+  scale_radius(limits = c(0, 35), range = c(1, 6)) + 
+  # annotate(geom = "text", x = -78, y = 38, label = "MD", 
+  #      fontface = "italic", color = "grey22", size = 4)+
+  theme(axis.title = element_blank(), 
+        legend.title = element_blank())+
+  guides(color=guide_legend(ncol=2)) +
+  ggtitle("Sum PFAS in fish - 2021")
+
+p_fish_2022<-ggplot(us_md) +
+  geom_sf(data = us_md) +
+  geom_sf(aes(fill = color_state), color = NA, show.legend = F) +
+  scale_fill_manual(values = c("grey95", "grey45")) +
+  # geom_sf(data = riversped, col = 'blue3')+
+  coord_sf(xlim = c(-79.7, -75), ylim = c(37.5, 40))+
+  theme_pubclean()+
+  # scale_color_jama()+
+  geom_point(data = subset(data_loc, data_loc$Year_fish == 2022),
+             mapping = aes(x = lon, y = lat,
+                           # color  = Region,
+                           size = SumPFAS_fish), 
+             pch=21, color = "red")+
+  # annotate(geom = "text", x = -78, y = 38, label = "MD", 
+  #      fontface = "italic", color = "grey22", size = 4)+
+  scale_radius(limits = c(0, 35), range = c(1, 6)) + 
+  theme(axis.title = element_blank(), 
+        legend.title = element_blank())+
+  guides(color=guide_legend(ncol=2)) +
+  ggtitle("Sum PFAS in fish - 2022")
+
+```
+
+```{r save water and fish maps 2021 2022}
+ggsave(plot = p_water_2022, file = here("figures/water_PFAS_map2022_MDWMC.png"), 
+       type = "cairo-png",  bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800)
+
+ggsave(plot = p_water_2021, file = here("figures/water_PFAS_map2021_MDWMC.png"), 
+       type = "cairo-png",  bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800)
+
+ggsave(plot = p_fish_2022, file = here("figures/fish_PFAS_map2022_MDWMC.png"), 
+       type = "cairo-png",  bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800)
+
+ggsave(plot = p_fish_2021, file = here("figures/fish_PFAS_map2021_MDWMC.png"), 
+       type = "cairo-png",  bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800)
+```
+
+### PFAS in water and 
+```{r all together }
+# 
+# ggplot(d_water_sum,# water
+#        aes(y = Sum_PFAS,
+#           x = Activity_Start_Date,
+#           color = Region,
+#           fill = Region))+
+#   geom_point(data = data_tot_sum,# fish
+#              mapping = aes(y = Sum_PFAS_mean,
+#                            x = as.Date(Activity_Start_Date,
+#                            color = Region,
+#                            fill = Region)),
+#              pch = 1)+
+#   geom_point(pch = 21, size = 2, alpha = 1)+
+#   theme_classic()+
+#   geom_hline(yintercept = 30, color = "grey", linetype = "dashed")+
+#   scale_color_jama()+
+#   scale_fill_jama()+
+#   scale_x_date(date_labels = "%b %Y")+
+#   facet_grid(.~Year, scales = "free")+
+#   xlab("Date")+
+#   ylab("Sum PFAS (ng/l; ng/g)")+
+#   theme(axis.text.x = element_text(angle = 45, size = 7))+
+#   ggtitle("open = fish, solid = water")
+
+```
+
+```{r}
+# set the year 
+year <- 2021
+  
+# water data 
+data_l.w <- d %>%
+  filter(Year == year & 
+         Subject_Taxonomic_Name == "water")
+# levels(data_l.w$Subject_Taxonomic_Name)
+# levels(data_l.w$Monitoring_Location_ID)
+
+# fish data
+data_l.f <- d %>%
+  filter(Year == year & 
+       !Subject_Taxonomic_Name == "water")
+
+# levels(data_l$Subject_Taxonomic_Name)
+# levels(data_l.w$Monitoring_Location_ID)
+
+# percent summaries, not by species fish 
+data_l.f_means<-data_l.f %>% 
+  filter(Year == year) %>% 
+  dplyr::group_by(Monitoring_Location_ID,
+                  Characteristic_Name_abr, Region) %>%
+  summarise(mean_pfas_compound = mean(Result_Value), 
+            n_samples = n(),
+            .groups = 'keep') %>%  # mean of all fish sampled. sample size provided
+  dplyr::group_by(Monitoring_Location_ID, Region) %>%   
+  mutate(perc_pfas_location = 100*mean_pfas_compound /
+              sum(mean_pfas_compound),.groups = 'keep')
+
+# water means
+data_l.w_means<-data_l.w %>% 
+  filter(Year == year) %>% 
+  dplyr::group_by(Monitoring_Location_ID,
+                  Characteristic_Name_abr, Region) %>%
+  summarise(mean_pfas_compound = mean(Result_Value), 
+            n_samples = n(),
+            .groups = 'keep') %>% 
+  dplyr::group_by(Monitoring_Location_ID, Region) %>%   
+  mutate(perc_pfas_location = 100*mean_pfas_compound /
+              sum(mean_pfas_compound),.groups = 'keep')
+
+water1<-ggplot(data_l.w)+
+  geom_bar(
+             mapping = aes(Monitoring_Location_ID, Result_Value,
+                  group = Monitoring_Location_ID,
+                  color = Characteristic_Name_abr,
+                  fill = Characteristic_Name_abr),
+           stat = "identity",
+           show.legend = T,
+           width = 1)+
+  theme_bw()+
+  facet_grid(.~Region, space = "free", scales = "free")+
+  scale_fill_manual( values = cols_pfas)+
+  scale_color_manual( values = cols_pfas)+
+  theme(axis.text.x = element_text(angle = 90, face = "italic"))+
+  theme(strip.background = element_blank(),
+        strip.placement = "outside",
+        panel.spacing = unit(0, "lines"), 
+        legend.title = element_blank())+
+  xlab("Sampling sites")+
+  ylab("PFAS (ng/g) in water")+
+  ylim(0,80)+
+  ggtitle(year) 
+
+
+
+fish1<-ggplot()+
+  geom_bar(data_l.f_means, # water means
+             mapping = aes(Monitoring_Location_ID, mean_pfas_compound,
+                  group = Monitoring_Location_ID,
+                  color = Characteristic_Name_abr,
+                  fill = Characteristic_Name_abr),
+           stat = "identity",
+           show.legend = F,
+           width = 1)+
+  theme_bw()+
+  facet_grid(.~Region, space = "free", scales = "free")+
+  scale_fill_manual( values = cols_pfas)+
+  scale_color_manual( values = cols_pfas)+
+  theme(axis.text.x = element_text(angle = 90, face = "italic"))+
+  theme(strip.background = element_blank(),
+        strip.placement = "outside",
+        panel.spacing = unit(0, "lines"), 
+        legend.title = element_blank())+
+  xlab("Sampling sites")+
+  ylab("PFAS (ng/L) in fish")+
+  ylim(0,30)+
+  ggtitle(year)
+
+p1.perc<-ggplot(data_l.w_means,
+             aes(Monitoring_Location_ID, perc_pfas_location ,
+                  group = Monitoring_Location_ID,
+                  color = Characteristic_Name_abr,
+                  fill = Characteristic_Name_abr))+
+    geom_bar(stat = "identity",  show.legend = T)+
+    # facet_grid(.~Monitoring_Location_ID, switch="both")+
+    theme_bw()+
+    scale_fill_manual( values = cols_pfas)+
+    scale_color_manual( values = cols_pfas)+
+    theme(axis.text.x = element_text(angle = 90, face = "italic"))+
+    theme(strip.background = element_blank(),
+          strip.placement = "outside",
+          panel.spacing = unit(0, "lines"), 
+        legend.title = element_blank())+
+    xlab("Sampling sites")+
+    ylab("PFAS (ng/L) in water")+
+    # ylim(-250, 250)+
+    geom_bar(data_l.f_means,
+             mapping = aes(Monitoring_Location_ID, -perc_pfas_location,
+                  group = Monitoring_Location_ID,
+                  color = Characteristic_Name_abr,
+                  fill = Characteristic_Name_abr),
+    stat = "identity",  show.legend = T)+
+    ggtitle(year)
+
+
+## saving 
+
+if(year == 2021){
+  ggsave(plot = water1, file = here(paste("figures/water_MDWMC", year, ".png")), 
+         type = "cairo-png",  bg = "transparent",
+         width = 16.5, height = 10, units = "cm", dpi = 800)
+  
+  ggsave(plot = fish1, file = here(paste("figures/fish_MDWMC", year, ".png")), 
+       type = "cairo-png",  bg = "transparent",
+       width = 15.5, height = 10, units = "cm", dpi = 800)
+}
+if(year == 2022){
+  ggsave(plot = water1, file = here(paste("figures/water_MDWMC", year, ".png")), 
+         type = "cairo-png",  bg = "transparent",
+         width = 14.5, height = 10, units = "cm", dpi = 800)
+  
+  ggsave(plot = fish1, file = here(paste("figures/fish_MDWMC", year, ".png")), 
+       type = "cairo-png",  bg = "transparent",
+       width = 8, height = 10, units = "cm", dpi = 800)
+}
+
+
+ggsave(plot = p1.perc, file = here(paste("figures/percent_water_fish_MDWMC", year, ".png")), 
+       type = "cairo-png",  bg = "transparent",
+       width = 16, height = 10, units = "cm", dpi = 800)
+
+
+  # get legend seperately
+# leg<-ggpubr::get_legend(p1.perc, position = "top")
+# p1.perc<-p1.perc+theme(legend.position = "none")
+
+
+```
+
+
+
+
+```{r sum by individual fish and species }
+
+# d %>% 
+  
+# 
+#   plot_return<-cowplot::plot_grid(p.sp.1, p.sp.2, as_ggplot(leg), 
+#                                   nrow = 3,
+#                      rel_heights = c(1.2,1.4, 1.3))
+#     
+  
+
+```
+
